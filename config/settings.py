@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     groq_vision_model: str = "qwen/qwen3.8-27b"
     groq_timeout_seconds: int = 120
     groq_max_image_bytes: int = 20 * 1024 * 1024
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    semantic_match_threshold: float = 0.55
     capture_sample_every_n_frames: int = 5
     capture_page_change_threshold: float = 18.0
     capture_stability_threshold: float = 3.0

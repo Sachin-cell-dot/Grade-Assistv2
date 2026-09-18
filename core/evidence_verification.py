@@ -29,6 +29,7 @@ class EvidenceSummary(BaseModel):
     questions_with_student_answer: int
     questions_with_teacher_symbol: int
     questions_with_individual_mark: int
+    visible_individual_mark_sum: float | None
     identity_fields_present: list[str] = Field(default_factory=list)
 
 
@@ -87,6 +88,11 @@ def verify_extraction(extraction: VisionExtraction) -> VerificationResult:
         questions_with_student_answer=sum(question.student_answer.visible_text is not None for question in questions),
         questions_with_teacher_symbol=sum(bool(question.teacher_marking and question.teacher_marking.visible_symbols) for question in questions),
         questions_with_individual_mark=sum(bool(question.teacher_marking and question.teacher_marking.visible_individual_score is not None) for question in questions),
+        visible_individual_mark_sum=(
+            sum(question.teacher_marking.visible_individual_score.obtained for question in questions if question.teacher_marking and question.teacher_marking.visible_individual_score is not None)
+            if questions and all(question.teacher_marking and question.teacher_marking.visible_individual_score is not None for question in questions)
+            else None
+        ),
         identity_fields_present=[field for field, value in identity.items() if value is not None],
     )
     checks: list[EvidenceCheck] = []
@@ -113,7 +119,13 @@ def verify_extraction(extraction: VisionExtraction) -> VerificationResult:
         else:
             warnings.append("section_total_mismatch")
             checks.append(EvidenceCheck(name="section_total_comparison", status="fail", reason="section_total_mismatch", explanation=f"Visible section scores sum to {_display_number(summary.visible_section_score_sum)}, while the worksheet reports {_display_number(reported.obtained)}."))
-    if "section_total_mismatch" in warnings:
+    if summary.visible_individual_mark_sum is not None and reported is not None:
+        if abs(summary.visible_individual_mark_sum - reported.obtained) <= 1e-9:
+            checks.append(EvidenceCheck(name="individual_total_comparison", status="pass", explanation=f"Visible individual marks sum to {_display_number(summary.visible_individual_mark_sum)}, matching the worksheet-reported score."))
+        else:
+            warnings.append("individual_total_mismatch")
+            checks.append(EvidenceCheck(name="individual_total_comparison", status="fail", reason="individual_total_mismatch", explanation=f"Visible individual marks sum to {_display_number(summary.visible_individual_mark_sum)}, while the worksheet reports {_display_number(reported.obtained)}."))
+    if "section_total_mismatch" in warnings or "individual_total_mismatch" in warnings:
         status: Literal["consistent", "needs_review", "insufficient_evidence"] = "needs_review"
     elif blockers or "reported_total_missing" in warnings or "section_scores_incomplete" in warnings:
         status = "insufficient_evidence"

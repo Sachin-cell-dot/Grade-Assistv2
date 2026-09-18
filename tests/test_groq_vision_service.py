@@ -7,9 +7,11 @@ from config.settings import Settings
 from core.models import VisionExtraction
 from services.groq_vision_service import (
     GROQ_CHAT_COMPLETIONS_URL,
+    PROMPT,
     GroqVisionError,
     GroqVisionExtractionError,
     GroqVisionService,
+    GroqWorksheetExtraction,
     groq_dto_to_vision_extraction,
 )
 from tools.scoring import deterministic_total
@@ -88,3 +90,57 @@ def test_dto_to_canonical_preserves_evidence_without_numeric_inference(tmp_path)
     assert result.worksheet_reported_score.maximum == 20
     assert result.unassigned_teacher_markings[0].visible_comment == "Should improve"
     assert deterministic_total(result) is None
+
+
+def test_answer_sheet_duplicate_answer_is_not_presented_as_question_text():
+    dto = GroqWorksheetExtraction.model_validate({
+        "sections": [{"questions": [{
+            "identifier": "1", "question_text": "Student's handwritten answer",
+            "student_answer": "Student's handwritten answer",
+        }]}],
+    })
+    question = groq_dto_to_vision_extraction(dto).sections[0].questions[0]
+    assert question.question_text is None
+    assert question.student_answer.visible_text == "Student's handwritten answer"
+
+
+def test_answer_sheet_prompt_requires_visible_only_question_text_and_no_reference_use():
+    assert "question_text` means text visibly printed on THIS answer-sheet image only" in PROMPT
+    assert "Never copy `student_answer`" in PROMPT
+    assert "Do not use a question paper, rubric, answer key" in PROMPT
+
+
+def test_visible_scores_and_teacher_evidence_are_preserved_without_inference():
+    dto = GroqWorksheetExtraction.model_validate({
+        "reported_score_obtained": 10, "reported_score_maximum": 20,
+        "sections": [{"reported_score": None, "questions": [{
+            "identifier": "1", "student_answer": "visible answer", "teacher_symbol": "tick",
+            "teacher_correction": "red correction", "awarded_mark": 1,
+        }]}],
+    })
+    result = groq_dto_to_vision_extraction(dto)
+    question = result.sections[0].questions[0]
+    assert result.worksheet_reported_score.obtained == 10
+    assert result.worksheet_reported_score.maximum == 20
+    assert result.sections[0].visible_section_score is None
+    assert question.teacher_marking.visible_individual_score.obtained == 1
+    assert question.teacher_marking.visible_symbols == ["tick"]
+    assert question.teacher_marking.visible_correction == "red correction"
+
+
+def test_placeholder_key_fails_locally_without_request(tmp_path):
+    service = GroqVisionService(Settings(groq_api_key="replace_me"))
+    with pytest.raises(GroqVisionError, match="missing, blank, or a placeholder"):
+        service.extract_image(image_file(tmp_path))
+
+
+def test_separate_student_dtos_do_not_leak_evidence_between_extractions():
+    sachin = GroqWorksheetExtraction.model_validate({"student_name": "Sachin", "sections": [{"questions": [{"identifier": "1", "student_answer": "Sachin answer", "awarded_mark": 1}]}]})
+    rufina = GroqWorksheetExtraction.model_validate({"student_name": "Rufina", "sections": [{"questions": [{"identifier": "1", "student_answer": "Rufina answer", "teacher_symbol": "cross"}]}]})
+    sachin_result = groq_dto_to_vision_extraction(sachin)
+    rufina_result = groq_dto_to_vision_extraction(rufina)
+    assert sachin_result.student.name == "Sachin"
+    assert sachin_result.sections[0].questions[0].teacher_marking.visible_individual_score.obtained == 1
+    assert rufina_result.student.name == "Rufina"
+    assert rufina_result.sections[0].questions[0].student_answer.visible_text == "Rufina answer"
+    assert rufina_result.sections[0].questions[0].teacher_marking.visible_symbols == ["cross"]

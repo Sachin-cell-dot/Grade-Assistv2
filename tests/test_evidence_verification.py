@@ -60,3 +60,32 @@ def test_question_coverage_does_not_turn_symbols_into_marks_or_mutate_evidence()
     assert source.model_dump(mode="json") == before
     assert source.sections[0].questions[0].teacher_marking.visible_individual_score is None
     assert source.sections[0].questions[1].teacher_marking.visible_individual_score.obtained == 0
+
+
+def test_all_visible_individual_marks_mismatch_reported_total_requires_review():
+    source = extraction([None], reported=10, questions=[
+        {"identifier": "1", "teacher_marking": {"visible_individual_score": {"obtained": 2}}},
+        {"identifier": "2", "teacher_marking": {"visible_individual_score": {"obtained": 2}}},
+        {"identifier": "3", "teacher_marking": {"visible_individual_score": {"obtained": 2}}},
+        {"identifier": "4", "teacher_marking": {"visible_individual_score": {"obtained": 2}}},
+        {"identifier": "5", "teacher_marking": {"visible_individual_score": {"obtained": 0}}},
+        {"identifier": "6", "teacher_marking": {"visible_individual_score": {"obtained": 3}}},
+    ])
+    result = verify_extraction(source)
+    check = next(check for check in result.checks if check.reason == "individual_total_mismatch")
+    assert result.status == "needs_review"
+    assert result.evidence_summary.visible_individual_mark_sum == 11
+    assert check.explanation == "Visible individual marks sum to 11, while the worksheet reports 10."
+
+
+def test_matching_individual_marks_do_not_create_mismatch():
+    source = extraction([None], reported=11, questions=[
+        {"identifier": "1", "teacher_marking": {"visible_individual_score": {"obtained": 2}}},
+        {"identifier": "2", "teacher_marking": {"visible_individual_score": {"obtained": 2}}},
+        {"identifier": "3", "teacher_marking": {"visible_individual_score": {"obtained": 2}}},
+        {"identifier": "4", "teacher_marking": {"visible_individual_score": {"obtained": 1}}},
+        {"identifier": "6", "teacher_marking": {"visible_individual_score": {"obtained": 4}}},
+    ])
+    result = verify_extraction(source)
+    assert result.evidence_summary.visible_individual_mark_sum == 11
+    assert "individual_total_mismatch" not in result.warnings
