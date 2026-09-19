@@ -8,8 +8,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config.settings import get_settings
-from services.dashboard_service import dashboard_summary, topic_insights, verified_student_performance
-from services.email_service import report_email_preview, send_report_email, smtp_ready, student_report_body
+from database.audit_store import AuditStore
+from services.dashboard_service import assessment_activity, dashboard_summary, topic_insights, verified_student_performance
+from services.email_service import email_send_readiness, report_email_preview, send_report_email, student_report_body
 from services.report_export import build_class_report
 
 
@@ -68,7 +69,17 @@ def render_teacher_dashboard(connection: sqlite3.Connection) -> None:
         st.plotly_chart(px.line(history, x="Date", y="Percentage", markers=True, title="Assessment history"), use_container_width=True)
     report_bytes = build_class_report(filtered, summary)
     st.download_button("Export Class Report", report_bytes, file_name="gradeassist-class-report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.subheader("GradeAssist Activity")
+    st.dataframe([
+        {"Stage": item.label, "Status": item.status, "What happened": item.detail}
+        for item in assessment_activity(connection, latest.audit_id, report_ready=True)
+    ], hide_index=True, use_container_width=True)
+    with st.expander("Automation boundary", expanded=False):
+        automatic, teacher = st.columns(2)
+        automatic.markdown("**GradeAssist automatically**\n\n- extracts visible evidence\n- verifies visible marks\n- routes uncertain cases\n- calculates analytics from verified results\n- prepares reports")
+        teacher.markdown("**Teacher controls**\n\n- evidence corrections\n- final mark decisions\n- email sending")
     st.subheader("Teacher-controlled email report")
+    st.warning("Teacher approval required — GradeAssist prepares the report, but sends nothing until you explicitly click Send Email.")
     recipient_options = {record.student_name: record for record in filtered}
     selected_students = st.multiselect("Select student recipient(s)", list(recipient_options))
     selected_records = [recipient_options[name] for name in selected_students]
@@ -96,18 +107,25 @@ def render_teacher_dashboard(connection: sqlite3.Connection) -> None:
         with st.expander("Email preview"):
             st.write(preview.get_content())
     settings = get_settings()
-    if not smtp_ready(settings):
-        st.info("SMTP is not configured. Configure SMTP_HOST and SMTP_FROM_EMAIL to enable sending.")
-    elif st.button("Send Email", type="primary"):
-        if not selected_records:
-            st.error("Select at least one student before sending.")
-        elif len(recipient_emails) != len(selected_records):
-            st.error("Email not available for one or more selected students. No email was sent.")
-        else:
-            try:
-                send_report_email(settings, recipient_emails, subject, body, report_bytes)
-                st.success("Email sent.")
-            except RuntimeError as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"Email could not be sent: {type(exc).__name__}.")
+    ready, readiness_message = email_send_readiness(
+        settings, selected_count=len(selected_records), recipient_count=len(recipient_emails)
+    )
+    if not ready:
+        st.info(readiness_message)
+    if st.button("Send Email", type="primary", disabled=not ready):
+        audit_store = AuditStore(connection)
+        for record in selected_records:
+            audit_store.record_email_event(record.audit_id, "ATTEMPTED", "Teacher explicitly selected Send Email.")
+        try:
+            send_report_email(settings, recipient_emails, subject, body, report_bytes)
+            for record in selected_records:
+                audit_store.record_email_event(record.audit_id, "SENT", "SMTP accepted the teacher-approved report for delivery.")
+            st.success("Email sent.")
+        except RuntimeError as exc:
+            for record in selected_records:
+                audit_store.record_email_event(record.audit_id, "FAILED", "SMTP configuration prevented delivery.")
+            st.error(str(exc))
+        except Exception as exc:
+            for record in selected_records:
+                audit_store.record_email_event(record.audit_id, "FAILED", f"SMTP delivery failed: {type(exc).__name__}.")
+            st.error(f"Email could not be sent: {type(exc).__name__}.")

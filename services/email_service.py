@@ -11,6 +11,17 @@ def smtp_ready(settings: Settings) -> bool:
     return bool(settings.smtp_host and settings.smtp_from_email)
 
 
+def email_send_readiness(settings: Settings, *, selected_count: int, recipient_count: int) -> tuple[bool, str]:
+    """Return a teacher-readable, non-secret reason before a send can occur."""
+    if selected_count == 0:
+        return False, "Select at least one verified student before sending."
+    if recipient_count != selected_count:
+        return False, "Email not available for one or more selected students. No email will be sent."
+    if not smtp_ready(settings):
+        return False, "SMTP configuration required: set SMTP_HOST and SMTP_FROM_EMAIL."
+    return True, "Ready for teacher approval. Sending occurs only after you click Send Email."
+
+
 def report_email_preview(subject: str, body: str, recipients: list[str]) -> EmailMessage:
     message = EmailMessage()
     message["To"] = ", ".join(recipients)

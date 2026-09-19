@@ -19,11 +19,13 @@ def initialize_database(database_path: Path | None = None) -> sqlite3.Connection
     _ensure_column(connection, "students", "parent_email", "TEXT")
     _ensure_column(connection, "students", "is_demo", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "assessments", "assessment_name", "TEXT")
+    _ensure_column(connection, "assessments", "audit_id", "INTEGER")
     _ensure_column(connection, "assessments", "maximum_marks", "REAL")
     _ensure_column(connection, "assessments", "verified_status", "TEXT")
     _ensure_column(connection, "assessments", "verified_at", "TEXT")
     _ensure_column(connection, "assessments", "is_demo", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "assessment_audits", "is_demo", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "assessment_audits", "demo_label", "TEXT")
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_assessments_audit_id ON assessments(audit_id) WHERE audit_id IS NOT NULL")
     connection.commit()
     return connection

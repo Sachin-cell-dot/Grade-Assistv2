@@ -105,6 +105,16 @@ class AuditStore:
     def record_suggestion(self, audit_id: int, suggestion: PartialCreditSuggestion) -> None: self.append(audit_id, "SEMANTIC_SUGGESTION", suggestion, suggestion.rationale)
     def record_partial_credit_decision(self, audit_id: int, decision: TeacherDisposition) -> None: self.append(audit_id, "PARTIAL_CREDIT_DECISION", decision, decision.rationale)
 
+    def record_email_event(self, audit_id: int, outcome: str, detail: str) -> None:
+        """Append a non-secret, teacher-action email delivery audit event."""
+        if outcome not in {"ATTEMPTED", "SENT", "FAILED"}:
+            raise ValueError(f"Unsupported email audit outcome: {outcome}")
+        self.connection.execute(
+            "INSERT INTO assessment_email_events(assessment_audit_id, outcome, detail) VALUES (?, ?, ?)",
+            (audit_id, outcome, detail),
+        )
+        self.connection.commit()
+
     def lifecycle_state(self, audit_id: int) -> LifecycleState:
         row = self.connection.execute("SELECT lifecycle_state FROM assessment_audits WHERE id = ?", (audit_id,)).fetchone()
         if row is None: raise KeyError(f"Unknown audit id: {audit_id}")

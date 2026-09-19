@@ -30,6 +30,7 @@ from services.groq_vision_service import (
     groq_question_paper_to_extraction,
     groq_rubric_to_extraction,
 )
+from services.assessment_finalization import finalize_verified_assessment, roster_contact
 from tools.scoring import deterministic_total
 from tools.vision import validate_worksheet_image
 from tools.worksheet_input import WorksheetInputError, prepare_worksheet_upload
@@ -262,7 +263,28 @@ def _render_teacher_review(
     st.dataframe(answer_evidence_rows(effective), hide_index=True, use_container_width=True)
     for item in routing.review_items:
         st.warning(item.summary)
+    st.warning("Teacher approval required before correcting evidence, confirming the extraction, or deferring review.")
     st.caption("GradeAssist extracted visible evidence and checked factual consistency. It did not grade, infer a correct mark, or change evidence.")
+
+    saved_guardian, saved_email = roster_contact(
+        audit_store.connection,
+        student_name=extraction.student.name,
+        class_name=extraction.student.class_name,
+    )
+    with st.expander("Student and parent contact", expanded=False):
+        st.caption("Roster details are teacher-supplied contact data. They do not alter the immutable extracted evidence.")
+        roster_student_name = st.text_input(
+            "Student name (roster)", value=extraction.student.name or "", key=f"roster-student-{audit_id}"
+        )
+        roster_class_name = st.text_input(
+            "Class (roster)", value=extraction.student.class_name or "", key=f"roster-class-{audit_id}"
+        )
+        parent_guardian_name = st.text_input(
+            "Parent/guardian name", value=saved_guardian or "", key=f"parent-guardian-{audit_id}"
+        )
+        parent_email = st.text_input(
+            "Parent email", value=saved_email or "", key=f"parent-email-{audit_id}"
+        )
 
     mark_paths = [
         f"sections[{section_index}].questions[{question_index}].teacher_marking.visible_individual_score.obtained"
@@ -297,6 +319,19 @@ def _render_teacher_review(
         if audit_store.lifecycle_state(audit_id) in {LifecycleState.EXTRACTED, LifecycleState.REVIEW_REQUIRED, LifecycleState.TEACHER_CONFIRMED}:
             audit_store.transition(audit_id, LifecycleState.DEFERRED, rationale="Teacher deferred review.")
         st.info("Review deferred. No verification decision was applied.")
+    if audit_store.lifecycle_state(audit_id) == LifecycleState.TEACHER_CONFIRMED:
+        st.success("Teacher confirmation recorded. Finalize to make this assessment available to the VERIFIED-only dashboard.")
+        if st.button("Finalize as VERIFIED", type="primary"):
+            finalize_verified_assessment(
+                audit_store.connection,
+                audit_id,
+                roster_student_name=roster_student_name or None,
+                roster_class_name=roster_class_name or None,
+                parent_guardian_name=parent_guardian_name or None,
+                parent_email=parent_email or None,
+            )
+            st.success("Assessment finalized as VERIFIED and added to the Teacher Dashboard.")
+            st.rerun()
     if corrections:
         st.markdown("**Append-only teacher corrections**")
         st.dataframe([
@@ -364,6 +399,7 @@ def _render_partial_credit_review(
             if suggestion.teacher_awarded_mark is None:
                 st.warning("No visible teacher mark was extracted, so no teacher-mark comparison action is available.")
                 continue
+            st.warning("Teacher approval required — this suggestion never changes the extracted teacher mark automatically.")
             accept, edit, proceed = st.columns(3)
             if accept.button("Accept suggestion", key=f"accept-{suggestion.question_identifier}"):
                 disposition = record_teacher_disposition(suggestion, TeacherDispositionAction.ACCEPT_SUGGESTION, "Teacher accepted the suggestion.")
