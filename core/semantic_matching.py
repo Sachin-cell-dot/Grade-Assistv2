@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from math import sqrt
 from functools import lru_cache
 from typing import Protocol
 
@@ -9,8 +10,9 @@ from pydantic import Field
 
 from core.models import EvidenceModel
 
-SEMANTIC_METHOD_VERSION = "sentence-transformers-semantic-v1"
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+SEMANTIC_METHOD_VERSION = "sentence-transformers-bge-small-en-v1.5-v1"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
 _NORMALIZED = re.compile(r"[^a-z0-9]+")
 # Generic language equivalences, activated only when their wording appears in
@@ -35,7 +37,7 @@ class SentenceEncoder(Protocol):
 
 class SemanticEmbeddingConfig(EvidenceModel):
     model_name: str = DEFAULT_EMBEDDING_MODEL
-    semantic_threshold: float = Field(default=0.55, ge=0, le=1)
+    semantic_threshold: float = Field(default=0.65, ge=0, le=1)
     allow_lexical_fallback: bool = True
 
 
@@ -65,7 +67,19 @@ def load_sentence_encoder(model_name: str) -> SentenceEncoder:
 
 
 def answer_sentences(answer: str) -> list[str]:
-    return [sentence.strip() for sentence in _SENTENCE.split(answer) if sentence.strip()] or [answer.strip()]
+    return [sentence.strip() for sentence in _SENTENCE.split(answer) if sentence.strip()]
+
+
+def cosine_similarity(left: object, right: object) -> float:
+    """Return bounded cosine similarity for local embedding vectors."""
+    left_values = list(left)
+    right_values = list(right)
+    numerator = sum(float(a) * float(b) for a, b in zip(left_values, right_values))
+    left_norm = sqrt(sum(float(value) ** 2 for value in left_values))
+    right_norm = sqrt(sum(float(value) ** 2 for value in right_values))
+    if not left_norm or not right_norm:
+        return 0.0
+    return max(0.0, min(1.0, numerator / (left_norm * right_norm)))
 
 
 def _normalise(text: str) -> str:
@@ -101,9 +115,21 @@ class SemanticSentenceMatcher:
 
     def match(self, criterion: str, answer: str) -> SemanticMatchEvidence:
         sentences = answer_sentences(answer)
-        vectors = self.encoder.encode([criterion, *sentences], normalize_embeddings=True)
+        if not criterion.strip() or not sentences:
+            return SemanticMatchEvidence(
+                matched=False,
+                similarity_score=0.0,
+                model_name=self.config.model_name,
+                threshold_used=self.config.semantic_threshold,
+                method="semantic",
+                match_rationale="Required rubric criterion or student-answer evidence is blank.",
+            )
+        # BGE retrieval models use a query instruction for the criterion only.
+        # Student-answer sentences are passages and must remain unprefixed.
+        query = BGE_QUERY_INSTRUCTION + criterion
+        vectors = self.encoder.encode([query, *sentences], normalize_embeddings=True)
         criterion_vector = vectors[0]
-        scores = [max(0.0, min(1.0, float(sum(left * right for left, right in zip(criterion_vector, sentence_vector))))) for sentence_vector in vectors[1:]]
+        scores = [cosine_similarity(criterion_vector, sentence_vector) for sentence_vector in vectors[1:]]
         best_index = max(range(len(scores)), key=scores.__getitem__)
         score = scores[best_index]
         alias_candidates = [(index, visible_rubric_aliases(criterion, sentence)) for index, sentence in enumerate(sentences)]

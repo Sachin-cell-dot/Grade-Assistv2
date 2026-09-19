@@ -1,7 +1,10 @@
 import core.partial_credit as partial_credit
 import pytest
+import sys
+import types
+from config.settings import Settings
 from core.models import VisionExtraction
-from core.semantic_matching import SemanticEmbeddingConfig, SemanticModelUnavailable, SemanticSentenceMatcher, visible_rubric_aliases
+from core.semantic_matching import BGE_QUERY_INSTRUCTION, DEFAULT_EMBEDDING_MODEL, SemanticEmbeddingConfig, SemanticModelUnavailable, SemanticSentenceMatcher, cosine_similarity, load_sentence_encoder, visible_rubric_aliases
 from core.reference_models import QuestionPaperExtraction, RubricExtraction
 
 
@@ -13,13 +16,19 @@ class FakeEncoder:
             "answer evidence": [1.0, 0.0],
             "weak evidence": [0.6, 0.8],
         }
-        return [vectors[text] for text in sentences]
+        return [vectors[text.removeprefix(BGE_QUERY_INSTRUCTION)] for text in sentences]
 
 
-def sources(answer="answer evidence", teacher_mark=0, criteria=None, maximum=2, answer_id="Q1", paper_id="1", rubric_id="1"):
+def sources(answer="answer evidence", teacher_mark=0, criteria=None, maximum=2, answer_id="Q1", paper_id="1", rubric_id="1", paper_maximum=None, criterion_weights=None):
     criteria = criteria or ["criterion match"]
-    question_paper = QuestionPaperExtraction.model_validate({"sections": [{"questions": [{"identifier": paper_id, "printed_text": "Visible printed question"}]}]})
-    rubric = RubricExtraction.model_validate({"sections": [{"questions": [{"identifier": rubric_id, "visible_criteria": criteria, "visible_maximum_marks": maximum}]}]})
+    paper_question = {"identifier": paper_id, "printed_text": "Visible printed question"}
+    if paper_maximum is not None:
+        paper_question["printed_maximum_marks"] = paper_maximum
+    rubric_question = {"identifier": rubric_id, "visible_criteria": criteria, "visible_maximum_marks": maximum}
+    if criterion_weights is not None:
+        rubric_question["visible_criterion_weights"] = criterion_weights
+    question_paper = QuestionPaperExtraction.model_validate({"sections": [{"questions": [paper_question]}]})
+    rubric = RubricExtraction.model_validate({"sections": [{"questions": [rubric_question]}]})
     answer_sheet = VisionExtraction.model_validate({"sections": [{"questions": [{"identifier": answer_id, "student_answer": {"visible_text": answer}, "teacher_marking": {"visible_individual_score": {"obtained": teacher_mark}}}]}]})
     return question_paper, rubric, answer_sheet
 
@@ -49,12 +58,116 @@ def test_semantic_non_match_and_threshold_behavior():
     assert matched.suggested_mark == 2
 
 
+def test_bge_default_configuration_and_query_prefix_apply_only_to_rubric_criteria():
+    received = []
+
+    class RecordingEncoder:
+        def encode(self, sentences, *, normalize_embeddings):
+            received.extend(sentences)
+            return [[1.0, 0.0] for _ in sentences]
+
+    matcher = SemanticSentenceMatcher(encoder=RecordingEncoder())
+    result = matcher.match("Visible rubric criterion", "First student sentence. Second student sentence.")
+
+    assert matcher.config.model_name == DEFAULT_EMBEDDING_MODEL == "BAAI/bge-small-en-v1.5"
+    assert matcher.config.semantic_threshold == 0.65
+    assert received == [
+        BGE_QUERY_INSTRUCTION + "Visible rubric criterion",
+        "First student sentence.",
+        "Second student sentence.",
+    ]
+    assert result.matched_answer_phrase == "First student sentence."
+
+
+def test_bge_sentence_transformer_loads_once_per_model_on_cpu(monkeypatch):
+    created = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name, *, device):
+            created.append((model_name, device))
+
+    load_sentence_encoder.cache_clear()
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
+    first = load_sentence_encoder(DEFAULT_EMBEDDING_MODEL)
+    second = load_sentence_encoder(DEFAULT_EMBEDDING_MODEL)
+    load_sentence_encoder.cache_clear()
+
+    assert first is second
+    assert created == [(DEFAULT_EMBEDDING_MODEL, "cpu")]
+    assert Settings(_env_file=None).embedding_model == DEFAULT_EMBEDDING_MODEL
+
+
+def test_cosine_similarity_and_strongest_answer_sentence_are_retained():
+    class Encoder:
+        def encode(self, sentences, *, normalize_embeddings):
+            assert sentences == [BGE_QUERY_INSTRUCTION + "criterion", "weak sentence.", "strong sentence"]
+            return [[1.0, 0.0], [0.2, 0.98], [1.0, 0.0]]
+
+    result = SemanticSentenceMatcher(encoder=Encoder()).match("criterion", "weak sentence. strong sentence")
+    assert cosine_similarity([1, 0], [0.6, 0.8]) == pytest.approx(0.6)
+    assert result.similarity_score == 1.0
+    assert result.matched_answer_phrase == "strong sentence"
+
+
+def test_blank_criterion_or_answer_is_unmatched_without_encoding():
+    class FailingEncoder:
+        def encode(self, sentences, *, normalize_embeddings):
+            raise AssertionError("blank evidence must not be encoded")
+
+    matcher = SemanticSentenceMatcher(encoder=FailingEncoder())
+    assert matcher.match("criterion", "  ").matched is False
+    assert matcher.match("  ", "student answer").matched is False
+
+
 def test_weighted_partial_coverage_and_mark_cap():
     question_paper, rubric, answer_sheet = sources(criteria=["criterion match", "criterion miss"], maximum=5)
     suggestion = partial_credit.semantic_partial_credit_suggestions(question_paper, rubric, answer_sheet, matcher=matcher())[0]
     assert suggestion.suggested_mark == 2.5
     assert suggestion.suggested_mark <= suggestion.rubric_maximum_marks
     assert len(suggestion.missing_rubric_criteria) == 1
+
+
+def test_visible_criterion_weights_contribute_only_when_matched_and_cap_to_question_maximum():
+    question_paper, rubric, answer_sheet = sources(
+        answer="answer evidence",
+        criteria=["criterion match", "criterion miss"],
+        maximum=6,
+        paper_maximum=4,
+        criterion_weights=[3, 3],
+    )
+    suggestion = partial_credit.semantic_partial_credit_suggestions(
+        question_paper, rubric, answer_sheet, matcher=matcher()
+    )[0]
+
+    assert suggestion.question_maximum_marks == 4
+    assert suggestion.rubric_maximum_marks == 6
+    assert suggestion.evaluation_maximum_marks == 4
+    assert suggestion.raw_semantic_coverage == 3
+    assert suggestion.suggested_mark == 3
+    assert suggestion.matched_rubric_criteria[0].criterion.weight == 3
+    assert suggestion.missing_rubric_criteria[0].criterion.weight == 3
+
+
+def test_matched_criterion_weights_are_capped_by_visible_question_maximum():
+    question_paper, rubric, answer_sheet = sources(
+        answer="answer evidence",
+        criteria=["first criterion", "second criterion"],
+        maximum=6,
+        paper_maximum=4,
+        criterion_weights=[3, 3],
+    )
+
+    class AllMatchEncoder:
+        def encode(self, sentences, *, normalize_embeddings):
+            return [[1.0, 0.0] for _ in sentences]
+
+    suggestion = partial_credit.semantic_partial_credit_suggestions(
+        question_paper, rubric, answer_sheet,
+        matcher=SemanticSentenceMatcher(encoder=AllMatchEncoder()),
+    )[0]
+
+    assert suggestion.raw_semantic_coverage == 4
+    assert suggestion.suggested_mark == 4
 
 
 def test_missing_mapping_or_evidence_is_insufficient():
@@ -121,7 +234,7 @@ def test_alias_supported_long_answer_uses_only_that_criterion_full_weight():
     )
     class AliasEncoder:
         def encode(self, sentences, *, normalize_embeddings):
-            return [[0.0, 1.0] if text == "criterion miss" else [1.0, 0.0] for text in sentences]
+            return [[0.0, 1.0] if text.removeprefix(BGE_QUERY_INSTRUCTION) == "criterion miss" else [1.0, 0.0] for text in sentences]
 
     suggestion = partial_credit.semantic_partial_credit_suggestions(question_paper, rubric, answer_sheet, matcher=SemanticSentenceMatcher(encoder=AliasEncoder()))[0]
     assert suggestion.suggested_mark == 2
@@ -137,12 +250,14 @@ def test_raw_semantic_coverage_is_preserved_while_displayed_mark_routes_teacher_
 
     class CoverageEncoder:
         def encode(self, sentences, *, normalize_embeddings):
-            return [[1.0, 0.0], [0.804, 0.0]]
+            # The production encoder returns normalized embeddings; retain a
+            # cosine of 0.804 rather than relying on an unnormalized dot product.
+            return [[1.0, 0.0], [0.804, 0.5946]]
 
     suggestion = partial_credit.semantic_partial_credit_suggestions(question_paper, rubric, answer_sheet, matcher=SemanticSentenceMatcher(encoder=CoverageEncoder()))[0]
-    assert suggestion.raw_semantic_coverage == 4.02
-    assert suggestion.suggested_mark == 4.0
-    assert suggestion.status == partial_credit.SuggestionStatus.AGREES_WITH_TEACHER
+    assert suggestion.raw_semantic_coverage == 5
+    assert suggestion.suggested_mark == 5.0
+    assert suggestion.status == partial_credit.SuggestionStatus.SUGGEST_REVIEW
 
 
 def test_missing_evidence_has_no_raw_semantic_coverage():

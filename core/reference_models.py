@@ -32,6 +32,9 @@ class QuestionPaperExtraction(EvidenceModel):
 class RubricQuestion(EvidenceModel):
     identifier: str | None = None
     visible_criteria: list[str] = Field(default_factory=list)
+    # Optional only: a teacher/imported rubric may preserve explicitly visible
+    # per-criterion marks. Groq's existing rubric DTO remains unchanged.
+    visible_criterion_weights: list[float] = Field(default_factory=list)
     visible_maximum_marks: float | None = Field(default=None, ge=0)
     visible_key_context: str | None = None
     uncertainty: Uncertainty = Field(default_factory=Uncertainty)

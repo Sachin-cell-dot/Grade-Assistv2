@@ -10,7 +10,7 @@ from pydantic import Field
 
 from core.evidence_mapping import map_question_evidence
 from core.models import EvidenceModel, Question, VisionExtraction
-from core.reference_models import QuestionPaperExtraction, RubricExtraction, RubricQuestion
+from core.reference_models import PrintedQuestion, QuestionPaperExtraction, RubricExtraction, RubricQuestion
 from core.semantic_matching import (
     SEMANTIC_METHOD_VERSION,
     SemanticEmbeddingConfig,
@@ -69,7 +69,9 @@ class CriterionMatchResult(EvidenceModel):
 class PartialCreditSuggestion(EvidenceModel):
     question_identifier: str | None = None
     teacher_awarded_mark: float | None = Field(default=None, ge=0)
+    question_maximum_marks: float | None = Field(default=None, ge=0)
     rubric_maximum_marks: float | None = Field(default=None, ge=0)
+    evaluation_maximum_marks: float | None = Field(default=None, ge=0)
     suggested_mark: float | None = Field(default=None, ge=0)
     raw_semantic_coverage: float | None = Field(default=None, ge=0)
     matched_rubric_criteria: list[CriterionMatchResult] = Field(default_factory=list)
@@ -220,17 +222,35 @@ def partial_credit_suggestions(answer_sheet: VisionExtraction, rubric: RubricExt
     ]
 
 
-def _semantic_suggestion(question: Question, rubric_question: RubricQuestion, matcher: SemanticSentenceMatcher) -> PartialCreditSuggestion:
+def _criteria_for_question(
+    rubric_question: RubricQuestion, evaluation_maximum: float
+) -> list[RubricCriterion]:
+    """Use visible criterion weights when preserved; otherwise split only the visible maximum."""
+    texts = [text for text in rubric_question.visible_criteria if text.strip()]
+    weights = rubric_question.visible_criterion_weights
+    if weights and len(weights) == len(texts) and all(weight > 0 for weight in weights):
+        return [RubricCriterion(text=text, weight=weight) for text, weight in zip(texts, weights)]
+    if not texts:
+        return []
+    return [RubricCriterion(text=text, weight=evaluation_maximum / len(texts)) for text in texts]
+
+
+def _semantic_suggestion(
+    question: Question,
+    question_paper_question: PrintedQuestion,
+    rubric_question: RubricQuestion,
+    matcher: SemanticSentenceMatcher,
+) -> PartialCreditSuggestion:
     answer = question.student_answer.visible_text
     teacher_mark = _teacher_mark(question)
-    maximum = rubric_question.visible_maximum_marks
-    if not answer or not answer.strip() or maximum is None or not rubric_question.visible_criteria:
-        return PartialCreditSuggestion(question_identifier=question.identifier, teacher_awarded_mark=teacher_mark, rubric_maximum_marks=maximum, matching_method=SEMANTIC_METHOD_VERSION, matching_mode="semantic_embedding", rationale="Required visible answer or rubric evidence is unavailable. Teacher review is required.", status=SuggestionStatus.INSUFFICIENT_EVIDENCE)
-    criterion_texts = [text for text in rubric_question.visible_criteria if text.strip()]
-    if not criterion_texts:
-        return PartialCreditSuggestion(question_identifier=question.identifier, teacher_awarded_mark=teacher_mark, rubric_maximum_marks=maximum, matching_method=SEMANTIC_METHOD_VERSION, matching_mode="semantic_embedding", rationale="No usable visible rubric criteria are available. Teacher review is required.", status=SuggestionStatus.INSUFFICIENT_EVIDENCE)
-    criteria = [RubricCriterion(text=text, weight=maximum / len(criterion_texts)) for text in criterion_texts]
-    long_answer = _is_long_answer(answer, maximum, LexicalConceptConfig())
+    question_maximum = question_paper_question.printed_maximum_marks
+    rubric_maximum = rubric_question.visible_maximum_marks
+    evaluation_maximum = question_maximum if question_maximum is not None else rubric_maximum
+    if not answer or not answer.strip() or evaluation_maximum is None or not rubric_question.visible_criteria:
+        return PartialCreditSuggestion(question_identifier=question.identifier, teacher_awarded_mark=teacher_mark, question_maximum_marks=question_maximum, rubric_maximum_marks=rubric_maximum, matching_method=SEMANTIC_METHOD_VERSION, matching_mode="semantic_embedding", rationale="Required visible answer, question maximum, or rubric evidence is unavailable. Teacher review is required.", status=SuggestionStatus.INSUFFICIENT_EVIDENCE)
+    criteria = _criteria_for_question(rubric_question, evaluation_maximum)
+    if not criteria:
+        return PartialCreditSuggestion(question_identifier=question.identifier, teacher_awarded_mark=teacher_mark, question_maximum_marks=question_maximum, rubric_maximum_marks=rubric_maximum, matching_method=SEMANTIC_METHOD_VERSION, matching_mode="semantic_embedding", rationale="No usable visible rubric criteria are available. Teacher review is required.", status=SuggestionStatus.INSUFFICIENT_EVIDENCE)
     matches = []
     for criterion in criteria:
         semantic = matcher.match(criterion.text, answer)
@@ -244,21 +264,23 @@ def _semantic_suggestion(question: Question, rubric_question: RubricQuestion, ma
             threshold_used=semantic.threshold_used,
             match_rationale=semantic.match_rationale,
         ))
-    # A visible-rubric alias is explicit evidence for this one criterion, so it
-    # earns that criterion's own weight. Pure semantic long-answer matches keep
-    # their similarity-weighted contribution.
-    raw_coverage = sum(match.criterion.weight * (1.0 if "visible_rubric_alias" in match.method else (match.similarity_score if long_answer else float(match.matched))) for match in matches)
-    raw_coverage = min(maximum, max(0, round(raw_coverage, 2)))
-    proposed = displayed_half_mark(raw_coverage, maximum)
+    # Each matched criterion contributes only its own explicit/deterministic
+    # weight. Similarity is retained as teacher-review evidence, never used as
+    # a fractional mark multiplier.
+    raw_coverage = sum(match.criterion.weight for match in matches if match.matched)
+    raw_coverage = min(evaluation_maximum, max(0, round(raw_coverage, 2)))
+    proposed = displayed_half_mark(raw_coverage, evaluation_maximum)
     matched = [match for match in matches if match.matched]
     missing = [match for match in matches if not match.matched]
     status = SuggestionStatus.INSUFFICIENT_EVIDENCE if teacher_mark is None else (SuggestionStatus.AGREES_WITH_TEACHER if abs(teacher_mark - proposed) <= 1e-9 else SuggestionStatus.SUGGEST_REVIEW)
     phrases = list(dict.fromkeys(match.matched_answer_phrase for match in matched if match.matched_answer_phrase))
-    rationale = f"GradeAssist found rubric evidence supporting {_display(proposed)} of {_display(maximum)} available marks. Teacher review is required before any final decision."
+    rationale = f"GradeAssist found {len(matched)} of {len(matches)} visible rubric criteria supported by the student answer, totaling {_display(proposed)} of {_display(evaluation_maximum)} available marks. Teacher review is required before any final decision."
     return PartialCreditSuggestion(
         question_identifier=question.identifier,
         teacher_awarded_mark=teacher_mark,
-        rubric_maximum_marks=maximum,
+        question_maximum_marks=question_maximum,
+        rubric_maximum_marks=rubric_maximum,
+        evaluation_maximum_marks=evaluation_maximum,
         suggested_mark=proposed,
         raw_semantic_coverage=raw_coverage,
         matched_rubric_criteria=matched,
@@ -301,7 +323,12 @@ def semantic_partial_credit_suggestions(
         if not mapping.is_complete:
             results.append(PartialCreditSuggestion(question_identifier=mapping.question_identifier, teacher_awarded_mark=_teacher_mark(mapping.answer_question), rationale=f"Question identifier mapping is incomplete: {', '.join(mapping.mapping_issues)}. Teacher review is required.", status=SuggestionStatus.INSUFFICIENT_EVIDENCE, matching_method=SEMANTIC_METHOD_VERSION, matching_mode="semantic_embedding"))
             continue
-        results.append(_semantic_suggestion(mapping.answer_question, mapping.rubric_question, matcher))
+        results.append(_semantic_suggestion(
+            mapping.answer_question,
+            mapping.question_paper_question,
+            mapping.rubric_question,
+            matcher,
+        ))
     # A question present in both reference documents but wholly absent from the
     # answer-sheet extraction is still a factual outcome: there is no answer
     # evidence to compare.  Surface it explicitly rather than silently
@@ -327,7 +354,11 @@ def semantic_partial_credit_suggestions(
         rubric_question = rubric_by_identifier[identifier]
         results.append(PartialCreditSuggestion(
             question_identifier=paper_by_identifier[identifier].identifier,
+            question_maximum_marks=paper_by_identifier[identifier].printed_maximum_marks,
             rubric_maximum_marks=rubric_question.visible_maximum_marks,
+            evaluation_maximum_marks=(paper_by_identifier[identifier].printed_maximum_marks
+                                      if paper_by_identifier[identifier].printed_maximum_marks is not None
+                                      else rubric_question.visible_maximum_marks),
             matching_method=SEMANTIC_METHOD_VERSION,
             matching_mode="semantic_embedding",
             rationale="No extracted student answer is available for this mapped question. Teacher review is required.",

@@ -1,5 +1,5 @@
-CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY, name TEXT, roll_number TEXT UNIQUE, class_name TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS assessments (id INTEGER PRIMARY KEY, student_id INTEGER REFERENCES students(id), subject TEXT, assessment_date TEXT, worksheet_reported_score REAL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY, name TEXT, roll_number TEXT UNIQUE, class_name TEXT, parent_guardian_name TEXT, parent_email TEXT, is_demo INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS assessments (id INTEGER PRIMARY KEY, student_id INTEGER REFERENCES students(id), assessment_name TEXT, subject TEXT, assessment_date TEXT, worksheet_reported_score REAL, maximum_marks REAL, verified_status TEXT, verified_at TEXT, is_demo INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS grading_drafts (id INTEGER PRIMARY KEY, assessment_id INTEGER NOT NULL REFERENCES assessments(id), extraction_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'extracted', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS extracted_question_marks (id INTEGER PRIMARY KEY, draft_id INTEGER NOT NULL REFERENCES grading_drafts(id), section_identifier TEXT, question_identifier TEXT NOT NULL, subquestion_identifier TEXT, visible_individual_score REAL, teacher_marking_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS assessment_audits (
@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS assessment_audits (
     original_extraction_json TEXT NOT NULL,
     provenance_json TEXT,
     lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('EXTRACTED','REVIEW_REQUIRED','TEACHER_CONFIRMED','VERIFIED','DEFERRED','BLOCKED')),
+    is_demo INTEGER NOT NULL DEFAULT 0,
+    demo_label TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS assessment_audit_events (

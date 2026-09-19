@@ -18,8 +18,18 @@ class Settings(BaseSettings):
     groq_answer_sheet_max_completion_tokens: int = Field(default=2200, ge=128, le=8192)
     groq_question_paper_max_completion_tokens: int = Field(default=3000, ge=128, le=8192)
     groq_rubric_max_completion_tokens: int = Field(default=2200, ge=128, le=8192)
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    semantic_match_threshold: float = 0.55
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    semantic_match_threshold: float = Field(default=0.65, ge=0, le=1)
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_use_tls: bool = True
+    # Local-only demo recipients. Leave unset unless the teacher has supplied
+    # real demonstration inboxes.
+    demo_sachin_email: str | None = None
+    demo_rufina_email: str | None = None
     capture_sample_every_n_frames: int = 5
     capture_page_change_threshold: float = 18.0
     capture_stability_threshold: float = 3.0

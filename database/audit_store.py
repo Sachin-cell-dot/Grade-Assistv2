@@ -70,6 +70,25 @@ class AuditStore:
         self.connection.commit()
         return int(row[0])
 
+    def create_demo_extraction(self, extraction: VisionExtraction, provenance: ExtractionProvenance) -> int:
+        """Create a distinct, explicitly labelled local-demo audit record.
+
+        This deliberately does not reuse a normal extraction fingerprint: a
+        REVIEW_REQUIRED source record must never be relabelled or promoted to
+        VERIFIED merely because it is used in a demo seed.
+        """
+        source_fingerprint = extraction_fingerprint(extraction)
+        fingerprint = sha256(f"local-demo|{source_fingerprint}".encode("utf-8")).hexdigest()
+        self.connection.execute(
+            "INSERT OR IGNORE INTO assessment_audits("
+            "extraction_fingerprint, original_extraction_json, provenance_json, lifecycle_state, is_demo, demo_label"
+            ") VALUES (?, ?, ?, ?, 1, ?)",
+            (fingerprint, _json(extraction), _json(provenance), LifecycleState.EXTRACTED.value, "LOCAL DEMO DATA"),
+        )
+        row = self.connection.execute("SELECT id FROM assessment_audits WHERE extraction_fingerprint = ?", (fingerprint,)).fetchone()
+        self.connection.commit()
+        return int(row[0])
+
     def original_extraction(self, audit_id: int) -> VisionExtraction:
         row = self.connection.execute("SELECT original_extraction_json FROM assessment_audits WHERE id = ?", (audit_id,)).fetchone()
         if row is None:
