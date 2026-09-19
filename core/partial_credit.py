@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -62,6 +63,7 @@ class CriterionMatchResult(EvidenceModel):
     method: str = METHOD_VERSION
     model_name: str | None = None
     threshold_used: float | None = Field(default=None, ge=0, le=1)
+    match_rationale: str | None = None
 
 
 class PartialCreditSuggestion(EvidenceModel):
@@ -69,6 +71,7 @@ class PartialCreditSuggestion(EvidenceModel):
     teacher_awarded_mark: float | None = Field(default=None, ge=0)
     rubric_maximum_marks: float | None = Field(default=None, ge=0)
     suggested_mark: float | None = Field(default=None, ge=0)
+    raw_semantic_coverage: float | None = Field(default=None, ge=0)
     matched_rubric_criteria: list[CriterionMatchResult] = Field(default_factory=list)
     missing_rubric_criteria: list[CriterionMatchResult] = Field(default_factory=list)
     evidence_phrases: list[str] = Field(default_factory=list)
@@ -192,6 +195,12 @@ def _display(value: float) -> str:
     return str(int(number)) if number.is_integer() else str(number)
 
 
+def displayed_half_mark(raw_coverage: float, rubric_maximum: float) -> float:
+    """Teacher-facing half-mark display; raw coverage remains audit evidence."""
+    capped = min(max(0.0, raw_coverage), rubric_maximum)
+    return float((Decimal(str(capped)) * 2).quantize(Decimal("1"), rounding=ROUND_HALF_UP) / 2)
+
+
 def _normalise_identifier(identifier: str | None) -> str:
     text = "".join(character for character in (identifier or "").lower() if character.isalnum())
     return text[1:] if text.startswith("q") and text[1:].isdigit() else text
@@ -233,9 +242,14 @@ def _semantic_suggestion(question: Question, rubric_question: RubricQuestion, ma
             method=semantic.method,
             model_name=semantic.model_name,
             threshold_used=semantic.threshold_used,
+            match_rationale=semantic.match_rationale,
         ))
-    proposed = sum(match.criterion.weight * (match.similarity_score if long_answer else float(match.matched)) for match in matches)
-    proposed = min(maximum, max(0, round(proposed, 2)))
+    # A visible-rubric alias is explicit evidence for this one criterion, so it
+    # earns that criterion's own weight. Pure semantic long-answer matches keep
+    # their similarity-weighted contribution.
+    raw_coverage = sum(match.criterion.weight * (1.0 if "visible_rubric_alias" in match.method else (match.similarity_score if long_answer else float(match.matched))) for match in matches)
+    raw_coverage = min(maximum, max(0, round(raw_coverage, 2)))
+    proposed = displayed_half_mark(raw_coverage, maximum)
     matched = [match for match in matches if match.matched]
     missing = [match for match in matches if not match.matched]
     status = SuggestionStatus.INSUFFICIENT_EVIDENCE if teacher_mark is None else (SuggestionStatus.AGREES_WITH_TEACHER if abs(teacher_mark - proposed) <= 1e-9 else SuggestionStatus.SUGGEST_REVIEW)
@@ -246,6 +260,7 @@ def _semantic_suggestion(question: Question, rubric_question: RubricQuestion, ma
         teacher_awarded_mark=teacher_mark,
         rubric_maximum_marks=maximum,
         suggested_mark=proposed,
+        raw_semantic_coverage=raw_coverage,
         matched_rubric_criteria=matched,
         missing_rubric_criteria=missing,
         evidence_phrases=phrases,

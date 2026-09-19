@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,9 @@ class Settings(BaseSettings):
     groq_vision_model: str = "qwen/qwen3.8-27b"
     groq_timeout_seconds: int = 120
     groq_max_image_bytes: int = 20 * 1024 * 1024
+    groq_answer_sheet_max_completion_tokens: int = Field(default=2200, ge=128, le=8192)
+    groq_question_paper_max_completion_tokens: int = Field(default=3000, ge=128, le=8192)
+    groq_rubric_max_completion_tokens: int = Field(default=2200, ge=128, le=8192)
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     semantic_match_threshold: float = 0.55
     capture_sample_every_n_frames: int = 5

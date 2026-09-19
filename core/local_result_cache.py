@@ -74,3 +74,31 @@ class LocalGroqResultCache:
             if cached.document_type == document_type and cached.model == model and cached.policy_version == policy_version:
                 candidates.append(cached)
         return max(candidates, key=lambda item: item.provenance.extracted_at) if candidates else None
+
+    def latest_for_document_type_any_model(self, document_type: str, policy_version: str) -> CachedGroqResult | None:
+        """Explicit fallback for offline demo selection; never used silently."""
+        if not self.directory.is_dir():
+            return None
+        candidates: list[CachedGroqResult] = []
+        for location in self.directory.glob("*.json"):
+            try:
+                cached = CachedGroqResult.model_validate_json(location.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if cached.document_type == document_type and cached.policy_version == policy_version:
+                candidates.append(cached)
+        return max(candidates, key=lambda item: item.provenance.extracted_at) if candidates else None
+
+    def for_source_image_identifier(self, document_type: str, source_image_identifier: str, policy_version: str) -> CachedGroqResult | None:
+        """Find an explicitly named source image across local cache models."""
+        if not self.directory.is_dir():
+            return None
+        candidates: list[CachedGroqResult] = []
+        for location in self.directory.glob("*.json"):
+            try:
+                cached = CachedGroqResult.model_validate_json(location.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if cached.document_type == document_type and cached.policy_version == policy_version and cached.provenance.source_image_identifier == source_image_identifier:
+                candidates.append(cached)
+        return max(candidates, key=lambda item: item.provenance.extracted_at) if candidates else None

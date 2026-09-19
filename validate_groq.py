@@ -17,6 +17,7 @@ elapsed = perf_counter() - started
 provenance = build_provenance(args.image, provider="groq", model=service.settings.groq_vision_model, policy_version="groq-json-prompt-v1", elapsed_seconds=elapsed)
 verification = verify_extraction(result)
 print(f"Provider/model: Groq / {service.settings.groq_vision_model}")
+print(f"Active completion-token budget (answer sheet): {service.settings.groq_answer_sheet_max_completion_tokens}")
 print(f"Elapsed time: {elapsed:.2f}s")
 print(f"HTTP status: {service.last_diagnostics.get('http_status')}")
 print(f"Raw response length: {service.last_diagnostics.get('raw_response_length')}")

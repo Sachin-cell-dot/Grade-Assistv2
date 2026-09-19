@@ -1,6 +1,7 @@
 import core.partial_credit as partial_credit
+import pytest
 from core.models import VisionExtraction
-from core.semantic_matching import SemanticEmbeddingConfig, SemanticModelUnavailable, SemanticSentenceMatcher
+from core.semantic_matching import SemanticEmbeddingConfig, SemanticModelUnavailable, SemanticSentenceMatcher, visible_rubric_aliases
 from core.reference_models import QuestionPaperExtraction, RubricExtraction
 
 
@@ -92,3 +93,60 @@ def test_semantic_module_has_no_groq_or_ollama_dependency():
     source = open("core/semantic_matching.py", encoding="utf-8").read()
     assert "Groq" not in source
     assert "Ollama" not in source
+
+
+@pytest.mark.parametrize(
+    ("criterion", "answer"),
+    [
+        ("Says that Meera stayed with/accompanied the man.", "She accompanied him at the station."),
+        ("Says that she helped him carry his heavy bag.", "She carried his luggage."),
+        ("Identifies that Meera felt happy/satisfied after helping the man.", "She felt pleased after helping."),
+        ("Connects her happiness to the positive effect of her kindness.", "Helping made a positive difference."),
+        ("Identifies that heavy rain made him uncertain / worried about the train.", "He was concerned about the train."),
+    ],
+)
+def test_visible_rubric_aliases_cover_clear_equivalences(criterion, answer):
+    assert visible_rubric_aliases(criterion, answer)
+
+
+def test_visible_rubric_aliases_do_not_match_unrelated_answer():
+    assert visible_rubric_aliases("Says that she helped him carry his heavy bag.", "The classroom was quiet.") == []
+    assert visible_rubric_aliases("Recognizes the positive emotional effect of kindness.", "Kindness can help others.") == []
+
+
+def test_alias_supported_long_answer_uses_only_that_criterion_full_weight():
+    question_paper, rubric, answer_sheet = sources(
+        answer="She accompanied him.", teacher_mark=0,
+        criteria=["Says that Meera stayed with/accompanied the man.", "criterion miss"], maximum=4,
+    )
+    class AliasEncoder:
+        def encode(self, sentences, *, normalize_embeddings):
+            return [[0.0, 1.0] if text == "criterion miss" else [1.0, 0.0] for text in sentences]
+
+    suggestion = partial_credit.semantic_partial_credit_suggestions(question_paper, rubric, answer_sheet, matcher=SemanticSentenceMatcher(encoder=AliasEncoder()))[0]
+    assert suggestion.suggested_mark == 2
+
+
+@pytest.mark.parametrize(("raw", "maximum", "expected"), [(4.02, 5, 4.0), (4.25, 5, 4.5), (9, 5, 5.0), (0, 5, 0.0)])
+def test_teacher_facing_semantic_mark_rounds_to_half_and_caps(raw, maximum, expected):
+    assert partial_credit.displayed_half_mark(raw, maximum) == expected
+
+
+def test_raw_semantic_coverage_is_preserved_while_displayed_mark_routes_teacher_review():
+    question_paper, rubric, answer_sheet = sources(teacher_mark=4, criteria=["criterion match"], maximum=5)
+
+    class CoverageEncoder:
+        def encode(self, sentences, *, normalize_embeddings):
+            return [[1.0, 0.0], [0.804, 0.0]]
+
+    suggestion = partial_credit.semantic_partial_credit_suggestions(question_paper, rubric, answer_sheet, matcher=SemanticSentenceMatcher(encoder=CoverageEncoder()))[0]
+    assert suggestion.raw_semantic_coverage == 4.02
+    assert suggestion.suggested_mark == 4.0
+    assert suggestion.status == partial_credit.SuggestionStatus.AGREES_WITH_TEACHER
+
+
+def test_missing_evidence_has_no_raw_semantic_coverage():
+    question_paper, rubric, answer_sheet = sources(answer="")
+    suggestion = partial_credit.semantic_partial_credit_suggestions(question_paper, rubric, answer_sheet, matcher=matcher())[0]
+    assert suggestion.suggested_mark is None
+    assert suggestion.raw_semantic_coverage is None

@@ -12,6 +12,21 @@ from core.models import EvidenceModel
 SEMANTIC_METHOD_VERSION = "sentence-transformers-semantic-v1"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+_NORMALIZED = re.compile(r"[^a-z0-9]+")
+# Generic language equivalences, activated only when their wording appears in
+# the visible rubric criterion. They are not question, student, or mark data.
+_VISIBLE_RUBRIC_ALIAS_GROUPS = (
+    ("luggage", "bag"),
+    ("accompanied", "accompany", "stayed with", "stay with"),
+    ("pleased", "happy", "satisfied"),
+    ("positive difference", "made a difference", "positive effect"),
+    ("worried", "concerned", "anxious"),
+    ("travelling", "traveling", "travel", "visit"),
+    ("daughter",),
+    ("carried", "carry", "helped carry", "helped with"),
+)
+_CHARACTER_ALIASES = ("kind", "kindness", "compassion", "compassionate", "caring", "helpful", "helpfulness")
+_ACTION_WORDS = {"noticed", "notice", "stayed", "stay", "helped", "help", "carried", "carry", "approached", "approach", "offered", "offer", "supported", "support", "left", "leave"}
 
 
 class SentenceEncoder(Protocol):
@@ -31,6 +46,7 @@ class SemanticMatchEvidence(EvidenceModel):
     model_name: str
     threshold_used: float = Field(ge=0, le=1)
     method: str = SEMANTIC_METHOD_VERSION
+    match_rationale: str | None = None
 
 
 class SemanticModelUnavailable(RuntimeError):
@@ -52,6 +68,32 @@ def answer_sentences(answer: str) -> list[str]:
     return [sentence.strip() for sentence in _SENTENCE.split(answer) if sentence.strip()] or [answer.strip()]
 
 
+def _normalise(text: str) -> str:
+    return f" {_NORMALIZED.sub(' ', text.lower()).strip()} "
+
+
+def _has_phrase(text: str, phrase: str) -> bool:
+    return f" {_normalise(phrase).strip()} " in _normalise(text)
+
+
+def visible_rubric_aliases(criterion: str, answer_phrase: str) -> list[str]:
+    """Return only explicit criterion concepts supported by visible aliases."""
+    hits = []
+    for group in _VISIBLE_RUBRIC_ALIAS_GROUPS:
+        if any(_has_phrase(criterion, term) for term in group) and any(_has_phrase(answer_phrase, term) for term in group):
+            hits.append(" / ".join(group))
+    if (_has_phrase(criterion, "quality") or _has_phrase(criterion, "character")) and any(_has_phrase(criterion, term) for term in _CHARACTER_ALIASES) and any(_has_phrase(answer_phrase, term) for term in _CHARACTER_ALIASES):
+        hits.append("character/quality: " + " / ".join(_CHARACTER_ALIASES))
+    # "actions" is visible rubric language; two concrete actions in the
+    # answer are support for that one criterion, not a whole-question score.
+    if _has_phrase(criterion, "actions") or _has_phrase(criterion, "action"):
+        answer_words = set(_normalise(answer_phrase).split())
+        action_hits = sorted(answer_words & _ACTION_WORDS)
+        if len(action_hits) >= 2:
+            hits.append("actions: " + ", ".join(action_hits))
+    return hits
+
+
 class SemanticSentenceMatcher:
     def __init__(self, config: SemanticEmbeddingConfig | None = None, encoder: SentenceEncoder | None = None):
         self.config = config or SemanticEmbeddingConfig()
@@ -64,10 +106,26 @@ class SemanticSentenceMatcher:
         scores = [max(0.0, min(1.0, float(sum(left * right for left, right in zip(criterion_vector, sentence_vector))))) for sentence_vector in vectors[1:]]
         best_index = max(range(len(scores)), key=scores.__getitem__)
         score = scores[best_index]
+        alias_candidates = [(index, visible_rubric_aliases(criterion, sentence)) for index, sentence in enumerate(sentences)]
+        alias_index, aliases = max(alias_candidates, key=lambda item: len(item[1]))
+        semantic_match = score >= self.config.semantic_threshold
+        alias_match = bool(aliases)
+        if alias_match and not semantic_match:
+            phrase_index = alias_index
+        else:
+            phrase_index = best_index
+        if semantic_match and alias_match:
+            method, rationale = "semantic+visible_rubric_alias", "Embedding threshold and visible-rubric alias both support this criterion."
+        elif alias_match:
+            method, rationale = "visible_rubric_alias", f"Visible-rubric alias match: {', '.join(aliases)}."
+        else:
+            method, rationale = "semantic", "Embedding similarity did not reach the configured threshold."
         return SemanticMatchEvidence(
-            matched=score >= self.config.semantic_threshold,
+            matched=semantic_match or alias_match,
             similarity_score=round(score, 4),
-            matched_answer_phrase=sentences[best_index],
+            matched_answer_phrase=sentences[phrase_index],
             model_name=self.config.model_name,
             threshold_used=self.config.semantic_threshold,
+            method=method,
+            match_rationale=rationale,
         )

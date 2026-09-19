@@ -58,6 +58,33 @@ def test_plain_json_request_parses_without_response_format(tmp_path):
     assert dto.student_name == "Rufina Thomas"
 
 
+@pytest.mark.parametrize(
+    ("method", "payload", "setting_name", "budget"),
+    [
+        ("extract_answer_sheet", rich_payload(), "groq_answer_sheet_max_completion_tokens", 2201),
+        ("extract_question_paper", {"worksheet_title": "Paper", "sections": []}, "groq_question_paper_max_completion_tokens", 3001),
+        ("extract_rubric", {"worksheet_title": "Rubric", "sections": []}, "groq_rubric_max_completion_tokens", 2202),
+    ],
+)
+def test_document_type_uses_its_configured_completion_budget(tmp_path, method, payload, setting_name, budget):
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return response(json.dumps(payload))
+
+    settings = Settings(groq_api_key="test-groq-secret", **{setting_name: budget})
+    service = GroqVisionService(settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    getattr(service, method)(image_file(tmp_path))
+    assert seen["max_completion_tokens"] == budget
+
+
+@pytest.mark.parametrize("setting_name", ["groq_answer_sheet_max_completion_tokens", "groq_question_paper_max_completion_tokens", "groq_rubric_max_completion_tokens"])
+def test_completion_budget_must_be_positive_reasonable_integer(setting_name):
+    with pytest.raises(ValueError):
+        Settings(**{setting_name: 0})
+
+
 def test_optional_json_fence_strips_safely(tmp_path):
     fenced = "```json\n" + json.dumps(rich_payload()) + "\n```"
     assert make_service(lambda request: response(fenced)).extract_image(image_file(tmp_path)).sections[0].identifier == "Addition"

@@ -341,6 +341,7 @@ class GroqVisionService:
         prompt: str,
         dto_type: type[GroqDtoType],
         is_empty: Callable[[GroqDtoType], bool],
+        max_completion_tokens: int,
     ) -> GroqDtoType:
         api_key = self._require_api_key()
         image_url = self._image_data_url(image_path)
@@ -351,7 +352,7 @@ class GroqVisionService:
                 {"type": "image_url", "image_url": {"url": image_url}},
             ]}],
             "temperature": 0,
-            "max_completion_tokens": 4096,
+            "max_completion_tokens": max_completion_tokens,
             "reasoning_effort": "none",
             "reasoning_format": "hidden",
         }
@@ -395,7 +396,7 @@ class GroqVisionService:
         return self.extract_answer_sheet(image_path)
 
     def extract_answer_sheet(self, image_path: str | Path) -> GroqWorksheetExtraction:
-        return self._extract_dto(image_path, PROMPT, GroqWorksheetExtraction, self._is_semantically_empty)
+        return self._extract_dto(image_path, PROMPT, GroqWorksheetExtraction, self._is_semantically_empty, self.settings.groq_answer_sheet_max_completion_tokens)
 
     def extract_question_paper(self, image_path: str | Path) -> GroqQuestionPaperExtraction:
         return self._extract_dto(
@@ -403,6 +404,7 @@ class GroqVisionService:
             QUESTION_PAPER_PROMPT,
             GroqQuestionPaperExtraction,
             lambda dto: not dto.sections and dto.worksheet_title is None and dto.printed_passage is None,
+            self.settings.groq_question_paper_max_completion_tokens,
         )
 
     def extract_rubric(self, image_path: str | Path) -> GroqRubricExtraction:
@@ -411,4 +413,5 @@ class GroqVisionService:
             RUBRIC_PROMPT,
             GroqRubricExtraction,
             lambda dto: not dto.sections and dto.worksheet_title is None,
+            self.settings.groq_rubric_max_completion_tokens,
         )

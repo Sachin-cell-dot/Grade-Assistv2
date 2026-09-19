@@ -22,6 +22,7 @@ from core.provenance import ExtractionProvenance, build_provenance
 from core.reference_models import QuestionPaperExtraction, RubricExtraction
 from core.routing import ReviewRoute, route_extraction
 from core.teacher_review import ReviewAction, TeacherCorrection, correction_value, resolve_teacher_review
+from core.teacher_evidence_import import local_result_label
 from services.groq_vision_service import (
     GroqVisionError,
     GroqVisionService,
@@ -35,6 +36,7 @@ from tools.worksheet_input import WorksheetInputError, prepare_worksheet_upload
 
 DocumentType = Literal["student_answer_sheet", "question_paper", "rubric"]
 POLICY_VERSION = "groq-json-prompt-v1"
+VERIFIED_LOCAL_RESULT_LABEL = "Verified local result"
 DOCUMENT_LABELS: dict[str, DocumentType] = {
     "Student answer sheet": "student_answer_sheet",
     "Question paper": "question_paper",
@@ -79,11 +81,11 @@ def teacher_readable_groq_error(error: GroqVisionError) -> str:
     return f"Groq Vision extraction failed: {error}"
 
 
-def _audit_for(extraction: VisionExtraction) -> tuple[AuditStore, int]:
+def _audit_for(extraction: VisionExtraction, provenance: ExtractionProvenance | None = None) -> tuple[AuditStore, int]:
     """Persist initial factual evaluation once per displayed immutable extraction."""
     fingerprint = extraction_fingerprint(extraction)
     store = AuditStore(initialize_database())
-    audit_id = store.create_extraction(extraction)
+    audit_id = store.create_extraction(extraction, provenance)
     key = f"audit-initialized:{fingerprint}"
     if not st.session_state.get(key):
         verification = verify_extraction(extraction)
@@ -108,9 +110,9 @@ def _render_audit_summary(store: AuditStore, audit_id: int) -> None:
     }], hide_index=True)
 
 
-def _render_teacher_review(extraction: VisionExtraction) -> None:
+def _render_teacher_review(extraction: VisionExtraction, provenance: ExtractionProvenance | None = None) -> None:
     """Small evidence-only review panel; corrections are append-only session records."""
-    audit_store, audit_id = _audit_for(extraction)
+    audit_store, audit_id = _audit_for(extraction, provenance)
     corrections = st.session_state.setdefault("teacher_corrections", [])
     effective = extraction
     if corrections:
@@ -220,6 +222,7 @@ def _render_partial_credit_review(answer_sheet: VisionExtraction, model: str) ->
                 continue
             st.write(f"Teacher visible mark: {suggestion.teacher_awarded_mark}")
             st.write(f"Suggested mark: {suggestion.suggested_mark}/{suggestion.rubric_maximum_marks}")
+            st.write(f"Raw semantic coverage: {suggestion.raw_semantic_coverage}/{suggestion.rubric_maximum_marks}")
             answer = answers_by_identifier.get(suggestion.question_identifier)
             st.write("Student answer:", answer.student_answer.visible_text if answer else None)
             st.write(suggestion.rationale)
@@ -254,6 +257,7 @@ def _render_partial_credit_review(answer_sheet: VisionExtraction, model: str) ->
     if dispositions:
         st.caption("Append-only partial-credit teacher dispositions")
         st.json([disposition.model_dump(mode="json") for disposition in dispositions])
+    _render_audit_summary(audit_store, audit_id)
 
 
 def _choose_image(upload_label: str) -> tuple[Path | None, str | None]:
@@ -297,6 +301,13 @@ def render_extraction_demo() -> None:
     settings_model = GroqVisionService().settings.groq_vision_model
     cache = LocalGroqResultCache()
     cached = cache.get(image_path, document_type, settings_model, POLICY_VERSION)
+    if cached is None:
+        # Imported local evidence may be fingerprinted by its JSON artifact,
+        # rather than the original uploaded image. This remains opt-in below.
+        cached = cache.for_source_image_identifier(document_type, image_path.name, POLICY_VERSION)
+    if cached is None and document_type in {"question_paper", "rubric"}:
+        # Reference-document selection is still explicit and clearly labelled.
+        cached = cache.latest_for_document_type_any_model(document_type, POLICY_VERSION)
     run_label = {
         "student_answer_sheet": "Run English evidence extraction",
         "question_paper": "Run question-paper extraction",
@@ -314,7 +325,7 @@ def render_extraction_demo() -> None:
     if use_cached:
         st.session_state["latest_document_result"] = cached.result_payload
         st.session_state["latest_document_provenance"] = cached.provenance.model_dump(mode="json")
-        st.session_state["latest_document_source"] = "Verified local result"
+        st.session_state["latest_document_source"] = local_result_label(cached.provenance)
     if run_live:
         try:
             extraction, provenance = extract_uploaded_document(image_path, document_type)
@@ -342,5 +353,6 @@ def render_extraction_demo() -> None:
         right.metric("Worksheet-reported total (as extracted)", result.worksheet_reported_score if result.worksheet_reported_score is not None else "Not visible")
         st.divider()
         st.subheader("English evidence review")
-        _render_teacher_review(result)
+        audit_provenance = ExtractionProvenance.model_validate(provenance) if provenance else None
+        _render_teacher_review(result, audit_provenance)
         _render_partial_credit_review(result, settings_model)

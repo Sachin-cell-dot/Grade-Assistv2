@@ -15,6 +15,9 @@ class ExtractionProvenance(BaseModel):
     source_image_fingerprint_sha256: str
     policy_version: str
     elapsed_seconds: float | None = None
+    source_type: str | None = None
+    import_note: str | None = None
+    requires_teacher_review: bool = False
 
 
 def build_provenance(

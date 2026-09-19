@@ -70,6 +70,18 @@ def test_cache_is_opt_in_and_cached_result_is_explicitly_labelled(tmp_path):
     assert "Run Groq again" in Path(extraction_demo.__file__).read_text(encoding="utf-8")
 
 
+def test_imported_cache_can_be_found_by_explicit_source_image_name(tmp_path):
+    source = tmp_path / "prior.json"
+    source.write_bytes(b"evidence")
+    cache = LocalGroqResultCache(tmp_path / "cache")
+    provenance = build_provenance(source, provider="teacher_verified_import", model="teacher-local", policy_version="policy-a")
+    provenance = provenance.model_copy(update={"source_image_identifier": "student.jpeg", "source_type": "teacher_verified_import"})
+    cache.put(source, "student_answer_sheet", "teacher-local", "policy-a", {"student": {}}, provenance)
+    found = cache.for_source_image_identifier("student_answer_sheet", "student.jpeg", "policy-a")
+    assert found is not None
+    assert found.provenance.model == "teacher-local"
+
+
 def test_429_has_calm_teacher_readable_message():
     message = extraction_demo.teacher_readable_groq_error(GroqVisionError("Groq Vision returned HTTP 429."))
     assert message == "Groq is temporarily rate-limited. Please wait briefly, then retry."
